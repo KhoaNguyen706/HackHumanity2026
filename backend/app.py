@@ -11,12 +11,9 @@ import requests
 # --------------------------------------------------------------------------------------
 # CONFIG (vLLM)
 # --------------------------------------------------------------------------------------
-# IMPORTANT:
-# - If vLLM is on the AMD droplet, you usually access it via SSH port-forward on your Mac.
-# - Example: if you forwarded droplet:30000 -> local:30001, set VLLM_BASE_URL to http://127.0.0.1:30001
-#
-# You can override without editing code:
+# Set these in your shell (recommended):
 #   export VLLM_BASE_URL="http://127.0.0.1:30001"
+#   export VLLM_MODEL_ID="Qwen/Qwen2.5-1.5B-Instruct"
 #
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:30001").rstrip("/")
 MODEL_ID = os.getenv("VLLM_MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")
@@ -42,7 +39,6 @@ def find_pii(text: str) -> Dict[str, List[str]]:
     found: Dict[str, List[str]] = {}
     for k, pattern in PII_PATTERNS.items():
         matches = pattern.findall(text or "")
-        # de-dupe + keep small sample
         uniq = list(dict.fromkeys(matches))[:20]
         if uniq:
             found[k] = uniq
@@ -123,7 +119,6 @@ def scan_risks(text: str) -> Dict[str, Any]:
                 score += int(rule["points"])
                 break
 
-    # This "score" is a penalty sum. We also provide a "level".
     if score >= 40:
         level = "high"
     elif score >= 20:
@@ -144,7 +139,7 @@ def _money_to_decimal(match: Optional[str]) -> Optional[float]:
     s = match.replace(",", "").replace("$", "").strip()
     try:
         return float(s)
-    except:
+    except Exception:
         return None
 
 def extract_rent_deposit_duration_notice(text: str) -> Dict[str, Any]:
@@ -156,11 +151,14 @@ def extract_rent_deposit_duration_notice(text: str) -> Dict[str, Any]:
         rent = _money_to_decimal(m.group(1))
 
     deposit = None
-    m = re.search(r"(?:security\s+deposit|deposit)\s*(?:is|of|:)?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)", t, re.IGNORECASE)
+    m = re.search(
+        r"(?:security\s+deposit|deposit)\s*(?:is|of|:)?\s*\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+        t,
+        re.IGNORECASE,
+    )
     if m:
         deposit = _money_to_decimal(m.group(1))
 
-    # naive duration extraction (tries to catch "one year" or date ranges)
     duration_days = None
     if re.search(r"\bone\s+year\b", t, re.IGNORECASE):
         duration_days = 365
@@ -172,7 +170,7 @@ def extract_rent_deposit_duration_notice(text: str) -> Dict[str, Any]:
     if m:
         try:
             notice_days = int(m.group(1))
-        except:
+        except Exception:
             pass
 
     return {
@@ -185,168 +183,151 @@ def extract_rent_deposit_duration_notice(text: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------------------
 # vLLM (OpenAI-compatible) CALL
 # --------------------------------------------------------------------------------------
-LEASE_JSON_PROMPT = r"""
+def call_vllm_structured(title: str, user: str, raw_text: str) -> Dict[str, Any]:
+    """
+    Returns a dict matching the required output schema (STRICT JSON).
+    """
+
+    prompt = f"""
 You are Leasify, an informational rental-lease analyzer (NOT a lawyer).
 Your job: extract only what is explicitly present in the lease text and produce a short, reliable summary.
 DO NOT guess. If something is missing or unclear, set it to null and explain briefly in "missing_reason".
-Use neutral language.
+Always support key outputs with an EXACT quote from the lease in "evidence_quote".
+Try to produce at least 7 annotations.
+For questions, generate 3-5 high-priority questions a tenant should ask to clarify risks/obligations.
+
+INPUT
+- LEASE TITLE / FILE: {title}
+- RAW TEXT (may be partial): {raw_text[:20000]}
+
+SPEED MODE
+Only analyze the MOST IMPORTANT 6–10 clauses:
+1) Rent amount & due date
+2) Security deposit & deductions
+3) Fees (late, cleaning, admin, utilities)
+4) Lease term & renewal/auto-renew
+5) Early termination / break lease
+6) Maintenance responsibilities (who pays for what)
+7) Landlord entry
+8) Subletting/guests/pets
+9) Arbitration / legal rights / attorney fees (if present)
+10) Notice periods (move-out, renewal, rent increase)
+
+RELIABILITY RULES
+- Use ONLY information that appears in the RAW TEXT.
+- Every numeric value must be supported by an evidence quote.
+- If multiple values exist, list the options and mark "ambiguous": true.
+- Evidence quotes must be EXACT and <= 280 characters.
+- If text is truncated and you suspect missing sections, set "text_incomplete": true.
 
 OUTPUT REQUIREMENT
 Return ONLY valid JSON matching this schema exactly:
 
-{
-  "title": "{filename}",
+{{
+  "title": "{title}",
   "text_incomplete": true/false,
-  "basic_info": {
-    "address": {
+  "basic_info": {{
+    "address": {{
       "value": string|null,
       "evidence_quote": string|null,
       "missing_reason": string|null
-    }
-  },
-  "overview": {
+    }}
+  }},
+  "overview": {{
     "risk_score": int,
     "overview_contents": string,
-    "rent_monthly": {
+    "rent_monthly": {{
       "value": number|null,
       "evidence_quote": string|null,
       "missing_reason": string|null,
       "ambiguous": true/false
-    },
-    "security_deposit": {
+    }},
+    "security_deposit": {{
       "value": number|null,
       "evidence_quote": string|null,
       "missing_reason": string|null,
       "ambiguous": true/false
-    },
-    "lease_term_days": {
+    }},
+    "lease_term_days": {{
       "value": int|null,
       "evidence_quote": string|null,
       "missing_reason": string|null,
       "ambiguous": true/false
-    },
-    "notice_period": {
+    }},
+    "notice_period": {{
       "value": string|null,
       "evidence_quote": string|null,
       "missing_reason": string|null
-    },
-    "late_fees": {
+    }},
+    "late_fees": {{
       "value": string|null,
       "evidence_quote": string|null,
       "missing_reason": string|null
-    },
-    "early_termination": {
+    }},
+    "early_termination": {{
       "value": string|null,
       "evidence_quote": string|null,
       "missing_reason": string|null
-    },
-    "utilities": {
+    }},
+    "utilities": {{
       "value": string|null,
       "evidence_quote": string|null,
       "missing_reason": string|null
-    }
-  },
+    }}
+  }},
   "results": [
-    {
+    {{
       "annotationText": "EXACT TEXT FROM THE LEASE AGREEMENT",
       "annotationLevel": "good"|"mix"|"bad",
       "annotationDesc": "CONCISE DESCRIPTION OF THE ANNOTATION, JUSTIFICATION OF LEVEL+IMPACT",
       "risk_title": string,
       "severity": "HIGH"|"MEDIUM"|"LOW",
       "evidence_location_hint": string|null
-    }
+    }}
   ],
   "questions": [
-    {
+    {{
       "question_priority": "high"|"medium"|"low",
       "question_explaination": string|null,
       "question_title": string
-    }
+    }}
   ]
-}
+}}
 
-STYLE RULES
-- overview_contents must be 10–15 bullet points using "•" or "-" in ONE string.
-- annotationDesc must be <= 50 words.
-- evidence_location_hint: use section header / clause title / nearby keyword to help UI highlighting.
-- Keep evidence_quote short (<= 280 chars) but EXACT.
-
-SPEED MODE (IMPORTANT)
-Do NOT summarize the entire lease.
-Only analyze the MOST IMPORTANT 6–10 clauses that typically create financial risk or major obligations:
-1) Rent amount & due date
-2) Security deposit & deductions
-3) Fees (late, cleaning, admin, utilities)
-4) Lease term & renewal/auto-renew
-5) Early termination / break lease
-6) Maintenance responsibilities
-7) Landlord entry
-8) Subletting/guests/pets
-9) Arbitration / legal rights / attorney fees (if present)
-10) Notice periods
-
-RELIABILITY RULES
-- Use ONLY information that appears in RAW TEXT.
-- Every numeric value must have an evidence_quote.
-- If multiple values exist, mark ambiguous=true and don’t guess.
-- If text seems truncated, set text_incomplete=true.
-- Return at least 7 results annotations.
-- Generate 3–5 high-priority questions.
-
-INPUT
-LEASE TITLE / FILE: {filename}
-RAW TEXT (may be partial): {raw_text}
+STYLE
+- overview_contents MUST be 10–15 bullet points using • or -
+- annotationDesc must be concise (<= 50 words).
+- evidence_location_hint: use any nearby header/keyword to help UI highlighting.
 """.strip()
-
-
-def _extract_json_object(s: str) -> str:
-    s = (s or "").strip()
-    if s.startswith("{") and s.endswith("}"):
-        return s
-    start = s.find("{")
-    end = s.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("Model did not return JSON.")
-    return s[start:end+1]
-
-
-def call_vllm_structured(title: str, user: str, raw_text: str) -> Dict[str, Any]:
-    # keep prompt stable + fast
-    raw_text = (raw_text or "")[:20000]
-
-    prompt = LEASE_JSON_PROMPT.format(
-        filename=title,
-        raw_text=raw_text.replace("\x00", "").strip()
-    )
 
     payload = {
         "model": MODEL_ID,
         "messages": [
-            {"role": "system", "content": "Return ONLY valid JSON. No markdown. No extra text."},
+            {"role": "system", "content": "Return ONLY valid JSON. No markdown. Use double quotes for all keys/strings."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2,
-        "max_tokens": 1400,
+        "temperature": 0.0,
+        "max_tokens": 1800,
+        # If your vLLM supports it, this dramatically reduces invalid JSON.
+        "response_format": {"type": "json_object"},
     }
 
-    r = requests.post(VLLM_CHAT_URL, json=payload, timeout=90)
+    r = requests.post(VLLM_CHAT_URL, json=payload, timeout=120)
     r.raise_for_status()
     data = r.json()
     content = data["choices"][0]["message"]["content"]
 
-    json_str = _extract_json_object(content)
-    return json.loads(json_str)
-
-    # Try parse JSON strictly
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        # last resort: attempt to extract first {...} block
         start = content.find("{")
         end = content.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(content[start : end + 1])
-        raise
+            try:
+                return json.loads(content[start:end + 1])
+            except Exception:
+                pass
+        raise ValueError(f"MODEL_RETURNED_INVALID_JSON\nRAW:\n{content[:4000]}")
 
 # --------------------------------------------------------------------------------------
 # ROUTES
@@ -357,16 +338,9 @@ def root():
 
 @app.get("/llm/health")
 def llm_health():
-    """
-    Confirms the backend can reach vLLM.
-    """
     r = requests.get(VLLM_MODELS_URL, timeout=10)
     r.raise_for_status()
-    return {
-        "ok": True,
-        "vllm_base_url": VLLM_BASE_URL,
-        "models": r.json(),
-    }
+    return {"ok": True, "vllm_base_url": VLLM_BASE_URL, "models": r.json()}
 
 @app.post("/analyze")
 async def analyze(
@@ -388,7 +362,6 @@ async def analyze(
     risk_report = scan_risks(text)
     extracted_fields = extract_rent_deposit_duration_notice(text)
 
-    # If caller didn’t pass title, use filename
     lease_title = title.strip() or (file.filename or "Untitled Lease")
 
     ai_structured = None
