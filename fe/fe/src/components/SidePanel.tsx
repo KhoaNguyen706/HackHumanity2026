@@ -4,6 +4,8 @@ import type { Highlight, AnalysisResult, EvidenceField } from '../types';
 import { AlertCircle } from 'lucide-react';
 import RiskBadge from './RiskBadge';
 
+
+
 interface SidePanelProps {
     analysis: AnalysisResult;
     selectedHighlight: Highlight | null;
