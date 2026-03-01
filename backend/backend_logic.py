@@ -407,7 +407,7 @@ def get_translated_report_data(lease_id, language_code):
     # Replace annotations fields
     if report_data.get("annotations"):
         for annotation in report_data["annotations"]:
-            annotation_id = annotation.get("id")
+            annotation_id = annotation.get("annotation_id")
             if annotation_id and ("a", annotation_id) in translation_map:
                 translated_parts = translation_map[("a", annotation_id)].split("|")
                 fields = object_fields.get("a", [])
