@@ -63,7 +63,7 @@ def query_lease(pathname, owner_email, raw_text): # owner_id is email for now, c
         # For now, we'll just return a placeholder response
         return {"status": "success", "lease_id": lease_id}
     else:
-        assert AssertionError("Failed to insert lease data into database")
+        raise AssertionError(f"Failed to insert lease data into database for pathname={pathname!r}, owner_email={owner_email!r}")
 
 # pull pathname given lease_id
 def pull_pathname(lease_id):
